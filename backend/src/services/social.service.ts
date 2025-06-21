@@ -1,10 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { Pool, PoolClient } from 'pg';
-import { Redis } from 'ioredis';
 import { logger } from '../utils/logger';
 import { AppError } from '../utils/errors';
-import { validateAddress } from '../utils/validation';
-import { CacheService } from './cache.service';
 
 // Database table names
 const TABLES = {
@@ -18,20 +15,6 @@ const TABLES = {
   USER_FOLLOWERS: 'user_followers'
 } as const;
 
-// Cache keys
-const CACHE_KEYS = {
-  USER_PROFILE: (userId: string) => `user:${userId}:profile`,
-  USER_FEED: (userId: string) => `user:${userId}:feed`,
-  POST: (postId: string) => `post:${postId}`,
-  POST_COMMENTS: (postId: string) => `post:${postId}:comments`
-} as const;
-
-// Cache TTLs in seconds
-const CACHE_TTL = {
-  SHORT: 300, // 5 minutes
-  MEDIUM: 3600, // 1 hour
-  LONG: 86400 // 24 hours
-} as const;
 
 // Database repository interface
 interface DatabaseRepository<T> {
@@ -45,23 +28,15 @@ interface DatabaseRepository<T> {
 abstract class BaseRepository<T extends { id: string }> implements DatabaseRepository<T> {
   constructor(
     protected readonly pool: Pool,
-    protected readonly tableName: string,
-    protected readonly cacheService: CacheService
+    protected readonly tableName: string
   ) {}
 
   async findById(id: string): Promise<T | null> {
-    const cacheKey = `${this.tableName}:${id}`;
-    return await this.cacheService.withCache(
-      cacheKey,
-      async () => {
-        const { rows: [item] } = await this.query<T>(
-          `SELECT * FROM ${this.tableName} WHERE id = $1`,
-          [id]
-        );
-        return item || null;
-      },
-      CACHE_TTL.MEDIUM
+    const { rows: [item] } = await this.query<T>(
+      `SELECT * FROM ${this.tableName} WHERE id = $1`,
+      [id]
     );
+    return item || null;
   }
 
   async create(data: Omit<T, 'id' | 'createdAt' | 'updatedAt'>): Promise<T> {
@@ -85,8 +60,7 @@ abstract class BaseRepository<T extends { id: string }> implements DatabaseRepos
       [id, now, ...values]
     );
 
-    // Invalidate cache for this item
-    await this.cacheService.invalidate(`${this.tableName}:${id}`);
+      // Cache implementation removed
 
     return item;
   }
@@ -128,11 +102,6 @@ abstract class BaseRepository<T extends { id: string }> implements DatabaseRepos
       [...values, id]
     );
 
-    if (item) {
-      // Invalidate cache for this item
-      await this.cacheService.invalidate(`${this.tableName}:${id}`);
-    }
-
     return item || null;
   }
 
@@ -142,16 +111,13 @@ abstract class BaseRepository<T extends { id: string }> implements DatabaseRepos
       [id]
     );
 
-    if (rowCount > 0) {
-      // Invalidate cache for this item
-      await this.cacheService.invalidate(`${this.tableName}:${id}`);
-      return true;
-    }
-
-    return false;
+    return rowCount > 0;
   }
 
-  protected async query<R = any>(text: string, params?: any[]): Promise<{ rows: R[]; rowCount: number }> {
+  protected async query<R extends { [key: string]: any } = any>(
+    text: string, 
+    params?: any[]
+  ): Promise<{ rows: R[]; rowCount: number }> {
     const client = await this.pool.connect();
     try {
       const result = await client.query<R>(text, params);
@@ -178,55 +144,6 @@ abstract class BaseRepository<T extends { id: string }> implements DatabaseRepos
     } finally {
       client.release();
     }
-  }
-}
-
-// Cache service for Redis
-class RedisCacheService {
-  constructor(private readonly redis: Redis) {}
-
-  async get<T>(key: string): Promise<T | null> {
-    try {
-      const data = await this.redis.get(key);
-      return data ? JSON.parse(data) : null;
-    } catch (error) {
-      logger.error(`Cache get failed for key ${key}:`, error);
-      return null;
-    }
-  }
-
-  async set(key: string, value: any, ttl?: number): Promise<void> {
-    try {
-      const serialized = JSON.stringify(value);
-      if (ttl) {
-        await this.redis.set(key, serialized, 'EX', ttl);
-      } else {
-        await this.redis.set(key, serialized);
-      }
-    } catch (error) {
-      logger.error(`Cache set failed for key ${key}:`, error);
-    }
-  }
-
-  async invalidate(keys: string | string[]): Promise<void> {
-    try {
-      await this.redis.del(Array.isArray(keys) ? keys : [keys]);
-    } catch (error) {
-      logger.error(`Cache invalidation failed for keys ${keys}:`, error);
-    }
-  }
-
-  async withCache<T>(
-    key: string,
-    fn: () => Promise<T>,
-    ttl: number = CACHE_TTL.MEDIUM
-  ): Promise<T> {
-    const cached = await this.get<T>(key);
-    if (cached) return cached;
-
-    const result = await fn();
-    await this.set(key, result, ttl);
-    return result;
   }
 }
 
@@ -304,23 +221,16 @@ export interface TradeActivity {
 }
 
 export class SocialService extends BaseRepository<UserProfile> {
-  private readonly pool: Pool;
-  private readonly redis: Redis;
-  private readonly cacheService: RedisCacheService;
+  // cacheService is inherited from BaseRepository
 
   constructor() {
     const pool = new Pool({
       connectionString: process.env.DATABASE_URL,
       ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
     });
-    const redis = new Redis(process.env.REDIS_URL);
-    const cacheService = new RedisCacheService(redis);
-    super(pool, TABLES.PROFILES, cacheService);
     
-    this.pool = pool;
-    this.redis = redis;
-    this.cacheService = new RedisCacheService(redis);
-    logger.info('SocialService initialized');
+    super(pool, TABLES.PROFILES);
+    logger.info('SocialService initialized without caching');
   }
 
   async createProfile(address: string, username: string, bio?: string): Promise<UserProfile> {
@@ -355,11 +265,7 @@ export class SocialService extends BaseRepository<UserProfile> {
       [profile.id, address, username, bio, 0, 0, 'none', 0, 0, profile.createdAt, profile.updatedAt]
     );
 
-    await this.cacheService.set(
-      CACHE_KEYS.USER_PROFILE(profile.id),
-      createdProfile,
-      CACHE_TTL.MEDIUM
-    );
+    // Cache setting removed
 
     logger.info(`Created profile for user ${username}`);
     return createdProfile;
@@ -411,11 +317,7 @@ export class SocialService extends BaseRepository<UserProfile> {
        postTags, 0, 0, 0, post.createdAt, post.updatedAt]
     );
 
-    await this.cacheService.set(
-      CACHE_KEYS.POST(post.id),
-      createdPost,
-      CACHE_TTL.MEDIUM
-    );
+    // Cache setting removed
 
     logger.info(`Created post ${post.id} by user ${userId}`);
     return createdPost;
@@ -479,10 +381,7 @@ export class SocialService extends BaseRepository<UserProfile> {
       );
     });
 
-    await this.cacheService.invalidate([
-      CACHE_KEYS.POST(postId),
-      CACHE_KEYS.POST_COMMENTS(postId)
-    ]);
+    // Cache invalidation removed
 
     logger.info(`Created comment ${comment.id} on post ${postId} by user ${userId}`);
     return comment;
@@ -546,12 +445,7 @@ export class SocialService extends BaseRepository<UserProfile> {
       }
     });
 
-    // Invalidate relevant cache entries
-    await this.cacheService.invalidate([
-      CACHE_KEYS.USER_PROFILE(userId),
-      CACHE_KEYS.USER_PROFILE(targetId),
-      CACHE_KEYS.POST(targetId)
-    ]);
+    // Cache invalidation removed
 
     logger.info(`Created ${type} interaction by user ${userId} on target ${targetId}`);
     return interaction;
@@ -656,8 +550,7 @@ export class SocialService extends BaseRepository<UserProfile> {
   }
 
   async getProfile(userId: string): Promise<UserProfile | null> {
-    const cachedProfile = await this.cacheService.get<UserProfile>(CACHE_KEYS.USER_PROFILE(userId));
-    if (cachedProfile) return cachedProfile;
+    // Cache check removed
 
     const { rows: [profile] } = await this.query(
       'SELECT * FROM user_profiles WHERE id = $1 OR address = $2',
@@ -680,11 +573,7 @@ export class SocialService extends BaseRepository<UserProfile> {
       );
     }
 
-    await this.cacheService.set(
-      CACHE_KEYS.USER_PROFILE(userId),
-      profile,
-      CACHE_TTL.SHORT
-    );
+    // Cache setting removed
 
     return profile;
   }
@@ -729,7 +618,7 @@ export class SocialService extends BaseRepository<UserProfile> {
       throw new Error('Profile not found');
     }
 
-    await this.cacheService.invalidate(CACHE_KEYS.USER_PROFILE(userId));
+    // Cache invalidation removed
     logger.info(`Updated profile for user ${userId}`);
     return updatedProfile;
   }
@@ -765,12 +654,7 @@ export class SocialService extends BaseRepository<UserProfile> {
       );
     });
 
-    // Invalidate caches
-    await this.cacheService.invalidate([
-      CACHE_KEYS.POST(postId),
-      CACHE_KEYS.POST_COMMENTS(postId),
-      CACHE_KEYS.USER_FEED(userId)
-    ]);
+    // Cache invalidation removed
 
     logger.info(`Deleted post ${postId} by user ${userId}`);
   }
@@ -798,10 +682,7 @@ export class SocialService extends BaseRepository<UserProfile> {
         [trade.user_id]
       );
 
-      await this.cacheService.invalidate([
-        CACHE_KEYS.USER_PROFILE(trade.user_id),
-        `trade:${tradeId}`
-      ]);
+      // Cache invalidation removed
 
       return trade;
     });
@@ -826,29 +707,30 @@ export class SocialService extends BaseRepository<UserProfile> {
   }
 
   private async checkTargetExists(targetId: string, type: Interaction['type']): Promise<boolean> {
-    let exists = false;
+    let table: string;
     
-    switch(type) {
+    switch (type) {
       case 'like':
       case 'share':
       case 'bookmark':
-        const { rows: [post] } = await this.query(
-          'SELECT id FROM posts WHERE id = $1 AND deleted_at IS NULL',
-          [targetId]
-        );
-        exists = !!post;
+        table = 'posts';
         break;
       case 'follow':
-      case 'copyTrade':
-        const { rows: [profile] } = await this.query(
-          'SELECT id FROM user_profiles WHERE id = $1 AND deleted_at IS NULL',
-          [targetId]
-        );
-        exists = !!profile;
+        table = 'user_profiles';
         break;
+      case 'copyTrade':
+        table = 'trade_activities';
+        break;
+      default:
+        return false;
     }
     
-    return exists;
+    const result = await this.query<{ exists: boolean }>(
+      `SELECT EXISTS(SELECT 1 FROM ${table} WHERE id = $1) as exists`,
+      [targetId]
+    );
+    
+    return result.rows[0]?.exists ?? false;
   }
 
   private analyzeSentiment(content: string): Post['sentiment'] {

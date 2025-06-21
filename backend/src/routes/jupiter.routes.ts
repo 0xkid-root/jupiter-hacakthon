@@ -4,28 +4,13 @@ import { jupiterController } from '../controllers/jupiter.controller';
 import { validate, validationRules } from '../middleware/validation.middleware';
 
 // Type-safe wrapper for async controller methods
-const asyncHandler = <T = any>(
-  fn: (req: Request, res: Response, next: NextFunction) => Promise<T | void>
-): RequestHandler => {
+function asyncHandler(
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<void>
+): RequestHandler {
   return (req: Request, res: Response, next: NextFunction): void => {
-    Promise.resolve(fn(req, res, next))
-      .then((result) => {
-        if (result !== undefined && result !== null) {
-          // If the handler returned a value, send it as JSON
-          res.json(result);
-          return;
-        }
-        
-        // If no response was sent and no result, send 204 No Content
-        if (!res.headersSent) {
-          res.status(204).end();
-        }
-      })
-      .catch((error) => {
-        next(error);
-      });
+    fn(req, res, next).catch(next);
   };
-};
+}
 
 const router = Router();
 
@@ -159,9 +144,9 @@ const routeValidations = {
  */
 
 router.get('/quote', validate(routeValidations.getQuote), 
-  (req: Request, res: Response, next: NextFunction) => {
-    jupiterController.getQuote(req, res, next);
-  }
+  asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+    await jupiterController.getQuote(req, res, next);
+  })
 );
 
 /**
@@ -230,11 +215,11 @@ router.get('/quote', validate(routeValidations.getQuote),
  *       500:
  *         description: Internal server error
  */
-router.get('/price', validate(routeValidations.getPrice), asyncHandler(
-  async (req: Request, res: Response, next: NextFunction) => {
-    return await jupiterController.getPrice(req, res, next);
-  }
-));
+router.get('/price', validate(routeValidations.getPrice), 
+  asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+    await jupiterController.getPrice(req, res, next);
+  })
+);
 
 /**
  * @swagger
@@ -288,11 +273,11 @@ router.get('/price', validate(routeValidations.getPrice), asyncHandler(
  *                 data:
  *                   $ref: '#/components/schemas/SwapTransactionResponse'
  */
-router.post('/swap', validate(routeValidations.getSwapTransaction), asyncHandler(
-  async (req: Request, res: Response, next: NextFunction) => {
-    return await jupiterController.getSwapTransaction(req, res, next);
-  }
-));
+router.post('/swap', validate(routeValidations.getSwapTransaction), 
+  asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+    await jupiterController.getSwapTransaction(req, res, next);
+  })
+);
 
 /**
  * @swagger
@@ -340,11 +325,11 @@ router.post('/swap', validate(routeValidations.getSwapTransaction), asyncHandler
  *                 data:
  *                   $ref: '#/components/schemas/SwapInstructionsResponse'
  */
-router.post('/swap-instructions', validate(routeValidations.getSwapInstructions), asyncHandler(
-  async (req: Request, res: Response, next: NextFunction) => {
-    return await jupiterController.getSwapInstructions(req, res, next);
-  }
-));
+router.post('/swap-instructions', validate(routeValidations.getSwapInstructions), 
+  asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+    await jupiterController.getSwapInstructions(req, res, next);
+  })
+);
 
 /**
  * @swagger
@@ -396,11 +381,11 @@ router.post('/swap-instructions', validate(routeValidations.getSwapInstructions)
  *       500:
  *         description: Internal server error
  */
-router.post('/send-transaction', validate(routeValidations.sendTransaction), asyncHandler(
-  async (req: Request, res: Response, next: NextFunction) => {
-    return await jupiterController.sendTransaction(req, res, next);
-  }
-));
+router.post('/send-transaction', validate(routeValidations.sendTransaction), 
+  asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+    await jupiterController.sendTransaction(req, res, next);
+  })
+);
 
 /**
  * @swagger

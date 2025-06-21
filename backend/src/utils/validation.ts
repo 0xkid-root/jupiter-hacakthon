@@ -98,7 +98,7 @@ export const validateUrl = (url: string): string => {
   
   try {
     const parsed = new URL(url);
-    if (!['http:', 'https:'].includes(protocol)) {
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
       throw new Error('Invalid protocol');
     }
     return parsed.toString();

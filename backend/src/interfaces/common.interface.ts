@@ -1,5 +1,3 @@
-import { AxiosInstance } from 'axios';
-
 // Rate limiter interface
 export interface RateLimiter {
   removeTokens(count: number, callback: (err: Error | null, remaining: number) => void): void;
@@ -57,6 +55,7 @@ export interface ErrorResponse {
 // Request options interface
 export interface RequestOptions {
   useCache?: boolean;
+  skipCache?: boolean;
   ttl?: number;
   headers?: Record<string, string>;
   params?: Record<string, any>;
