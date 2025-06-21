@@ -3,17 +3,29 @@ import { query } from 'express-validator';
 import { jupiterController } from '../controllers/jupiter.controller';
 import { validate, validationRules } from '../middleware/validation.middleware';
 
-// Type-safe wrapper for controller methods that return Promise<Response>
-type AsyncRequestHandler = (
-  req: Request,
-  res: Response,
-  next: NextFunction
-) => Promise<void>;
-
-const asyncHandler = (fn: AsyncRequestHandler): RequestHandler => 
-  (req: Request, res: Response, next: NextFunction) => {
-    Promise.resolve(fn(req, res, next)).catch(next);
+// Type-safe wrapper for async controller methods
+const asyncHandler = <T = any>(
+  fn: (req: Request, res: Response, next: NextFunction) => Promise<T | void>
+): RequestHandler => {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    Promise.resolve(fn(req, res, next))
+      .then((result) => {
+        if (result !== undefined && result !== null) {
+          // If the handler returned a value, send it as JSON
+          res.json(result);
+          return;
+        }
+        
+        // If no response was sent and no result, send 204 No Content
+        if (!res.headersSent) {
+          res.status(204).end();
+        }
+      })
+      .catch((error) => {
+        next(error);
+      });
   };
+};
 
 const router = Router();
 

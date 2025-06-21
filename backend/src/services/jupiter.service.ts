@@ -1,100 +1,539 @@
 import axios, { AxiosError, AxiosInstance } from 'axios';
+import axiosRetry, { IAxiosRetryConfig, exponentialDelay } from 'axios-retry';
+import { v4 as uuidv4 } from 'uuid';
 import config from '../config';
 import { logger } from '../utils/logger';
-import {
+import { 
   QuoteRequestParams,
   QuoteResponse,
+  PriceRequestParams,
+  PriceResponse,
   SwapTransactionRequest,
   SwapTransactionResponse,
   SwapInstructionsRequest,
   SwapInstructionsResponse,
   ProgramIdToLabelResponse,
-  TokenInfo,
-  TokenInfoResponse,
   MintsInMarketResponse,
   TradableTokensResponse,
   TaggedTokensResponse,
   NewTokensResponse,
   AllTokensResponse,
-  JupiterErrorResponse,
+  TokenInfo,
+  TokenInfoResponse,
   SendTransactionRequest,
   SendTransactionResponse,
-  PriceRequestParams,
-  PriceResponse,
+  JupiterErrorResponse
 } from '../interfaces/jupiter.interface';
+import { JupiterCacheService } from './jupiter-cache.service';
+import { 
+  RateLimiter,
+  JupiterConfig,
+  CacheService,
+  RedisClient,
+  RateLimitConfig,
+  RequestOptions
+} from '../interfaces/common.interface';
+import { 
+  JupiterError, 
+  RateLimitError, 
+  ValidationError, 
+  NotFoundError, 
+  InsufficientLiquidityError, 
+  SlippageToleranceExceededError 
+} from '../utils/jupiter-errors';
+
+// Constants for API paths and configuration
+const API_PATHS = {
+  QUOTE: '/quote',
+  SWAP: '/swap',
+  TOKENS: '/tokens',
+  PRICE: '/price',
+  PROGRAM_ID_TO_LABEL: '/program-id-to-label',
+  SWAP_INSTRUCTIONS: '/swap-instructions',
+} as const;
+
+// Default retry configuration
+const DEFAULT_RETRY_CONFIG: IAxiosRetryConfig = {
+  retries: 3,
+  retryDelay: exponentialDelay,
+  retryCondition: (error: AxiosError) => {
+    // Retry on network errors and 5xx responses
+    if (axiosRetry.isNetworkOrIdempotentRequestError(error)) {
+      return true;
+    }
+    
+    // Retry on rate limit exceeded (429) or server errors (5xx)
+    if (error.response) {
+      const status = error.response.status;
+      return status === 429 || (status >= 500 && status < 600);
+    }
+    
+    return false;
+  },
+  shouldResetTimeout: true,
+};
+
+// Rate limit configuration (moved to common.interface.ts)
+
+const DEFAULT_RATE_LIMIT_CONFIG: RateLimitConfig = {
+  maxRequestsPerMinute: 60, // Adjust based on your rate limits
+  retryAfterMs: 1000, // Default wait time when rate limited
+};
 
 /**
- * Service for interacting with the Jupiter Aggregator API
+ * Service for interacting with the Jupiter Aggregator API with production-ready features:
+ * - Automatic retries with exponential backoff
+ * - Response caching
+ * - Rate limiting
+ * - Comprehensive error handling
+ * - Request/response logging
+ * - Circuit breaking (via axios-retry)
  */
 class JupiterService {
   private readonly client: AxiosInstance;
-  private readonly baseURL: string;
-  private readonly tokenBaseURL: string;
+  private readonly tokenClient: AxiosInstance;
+  private readonly cache: JupiterCacheService;
+  private readonly rateLimiter: RateLimiter;
+  private readonly logger = logger;
+  private readonly tokenBaseURL: string = 'https://token.jup.ag';
+  private rateLimitRemaining: number = Number.MAX_SAFE_INTEGER;
+  private rateLimitReset: number = 0;
+  private requestQueue: Array<() => void> = [];
+  private isProcessingQueue = false;
+  private rateLimitConfig: RateLimitConfig = {
+    maxRequestsPerMinute: 60,
+    retryAfterMs: 1000
+  };
+  private useCache: boolean = true;
+  private cacheTtl: number = 300; // 5 minutes
 
-  constructor() {
-    this.baseURL = config.jupiter.apiBaseUrl || 'https://quote-api.jup.ag/v6';
-    this.tokenBaseURL = config.jupiter.tokenApiBaseUrl || 'https://token-api.jup.ag';
+  constructor(private config: JupiterConfig) {
+    // Initialize HTTP client
+    this.client = this.createAxiosInstance(config.baseUrl);
     
-    this.client = axios.create({
-      baseURL: this.baseURL,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(config.jupiter.apiKey && { 'Authorization': `Bearer ${config.jupiter.apiKey}` }),
-      },
-      timeout: 30000, // 30 seconds
-    });
-
+    // Set up token client
+    this.tokenClient = this.createAxiosInstance(this.tokenBaseURL);
+    
+    // Apply retry logic to both clients
+    this.configureRetry(this.client);
+    this.configureRetry(this.tokenClient);
+    
+    // Update rate limit config if provided
+    if (config.rateLimit) {
+      this.rateLimitConfig = {
+        maxRequestsPerMinute: config.rateLimit.tokensPerInterval,
+        retryAfterMs: 1000 // Default 1 second
+      };
+    }
+    
     // Add request interceptor for logging
     this.client.interceptors.request.use(
-      (config: any) => {
-        logger.debug(`Request: ${config.method?.toUpperCase()} ${config.url}`, {
-          baseURL: config.baseURL,
+      (config) => {
+        this.logger.debug(`Making request to ${config.url}`, {
+          method: config.method,
           params: config.params,
           data: config.data,
         });
         return config;
       },
-      (error: any) => {
-        logger.error('Request Error:', error);
+      (error) => {
+        this.logger.error('Request error:', error);
         return Promise.reject(error);
       }
     );
-
-    // Add response interceptor for logging and error handling
+    
+    // Add response interceptor for error handling
     this.client.interceptors.response.use(
-      (response: any) => {
-        logger.debug(`Response: ${response.status} ${response.config.url}`, {
-          status: response.status,
-          statusText: response.statusText,
-          data: response.data,
-        });
+      (response) => {
+        if (response.status >= 400) {
+          const error = new Error(`Request failed with status ${response.status}`);
+          (error as any).response = response;
+          return Promise.reject(error);
+        }
         return response;
       },
-      (error: any) => {
+      (error) => {
         if (error.response) {
-          // The request was made and the server responded with a status code
-          // that falls out of the range of 2xx
-          logger.error('API Error Response:', {
+          this.logger.error('Response error:', {
             status: error.response.status,
             statusText: error.response.statusText,
             data: error.response.data,
-            url: error.config.url,
-            method: error.config.method,
+            url: error.config?.url,
+            method: error.config?.method,
           });
         } else if (error.request) {
-          // The request was made but no response was received
-          logger.error('No response received:', {
-            message: error.message,
-            url: error.config.url,
-            method: error.config.method,
-          });
+          this.logger.error('No response received:', error.request);
         } else {
-          // Something happened in setting up the request that triggered an Error
-          logger.error('Request setup error:', error.message);
+          this.logger.error('Request setup error:', error.message);
         }
         return Promise.reject(error);
       }
     );
+
+    // Configure the main Jupiter API client
+    this.configureRetry(this.client);
+    
+    // Configure a separate client for token API with potentially different settings
+    this.tokenClient = this.createAxiosInstance(this.tokenBaseURL);
+    
+    // Apply retry logic to both clients
+    this.configureRetry(this.tokenClient);
+    
+    // Initialize rate limit tracking
+    this.rateLimitRemaining = this.rateLimitConfig.maxRequestsPerMinute;
+  }
+
+  /**
+   * Create a configured Axios instance with interceptors
+   */
+  private createAxiosInstance(baseURL: string): AxiosInstance {
+    const instance = axios.create({
+      baseURL,
+      timeout: 30000, // 30 seconds default
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': '',
+      },
+      // @ts-ignore - validateStatus is a valid axios config property
+      validateStatus: (status) => status >= 200 && status < 500,
+    });
+
+    // Add request interceptor for rate limiting and request ID
+    instance.interceptors.request.use(async (config) => {
+      const requestId = uuidv4();
+      config.headers['X-Request-ID'] = requestId;
+      
+      // Check rate limits before making the request
+      await this.checkRateLimit();
+      
+      logger.debug(`Making request to ${config.url}`, {
+        method: config.method,
+        params: config.params,
+        requestId,
+      });
+      
+      return config;
+    });
+
+    // Add response interceptor for logging and rate limit tracking
+    instance.interceptors.response.use(
+      (response) => {
+        // Update rate limit info from response headers if available
+        if (response.headers) {
+          this.updateRateLimitInfo(response.headers);
+        }
+        
+        logger.debug(`Response from ${response.config.url}`, {
+          status: response.status,
+          statusText: response.statusText,
+          requestId: response.config.headers['X-Request-ID'],
+        });
+        
+        return response;
+      },
+      async (error) => {
+        if (error.response) {
+          // Update rate limit info from error response if available
+          if (error.response.headers) {
+            this.updateRateLimitInfo(error.response.headers);
+          }
+          
+          logger.error('API Error:', {
+            status: error.response.status,
+            statusText: error.response.statusText,
+            url: error.config?.url,
+            method: error.config?.method,
+            requestId: error.config?.headers?.['X-Request-ID'],
+            data: error.response.data,
+          });
+          
+          // Convert to our custom error type
+          throw this.handleError(error);
+        } else if (error.request) {
+          // The request was made but no response was received
+          logger.error('No response received:', {
+            url: error.config?.url,
+            method: error.config?.method,
+            requestId: error.config?.headers?.['X-Request-ID'],
+            code: error.code,
+            message: error.message,
+          });
+        } else {
+          // Something happened in setting up the request
+          logger.error('Request setup error:', {
+            message: error.message,
+            stack: error.stack,
+          });
+        }
+        
+        return Promise.reject(error);
+      }
+    );
+
+    return instance;
+  }
+
+  /**
+   * Configure retry logic for an Axios instance
+   */
+  private configureRetry(instance: AxiosInstance): void {
+    // Use type assertion to work around the IAxiosRetryConfig type limitations
+    const retryConfig: any = {
+      ...DEFAULT_RETRY_CONFIG,
+      retryIf: (error: AxiosError) => {
+        // Don't retry on POST requests by default (override for specific endpoints if needed)
+        if (error.config?.method?.toUpperCase() === 'POST') {
+          return false;
+        }
+        
+        // Retry on network errors and 5xx responses
+        if (axiosRetry.isNetworkOrIdempotentRequestError(error)) {
+          return true;
+        }
+        
+        // Retry on rate limit exceeded (429) or server errors (5xx)
+        if (error.response) {
+          const status = error.response.status;
+          return status === 429 || (status >= 500 && status < 600);
+        }
+        
+        return false;
+      },
+    };
+    
+    axiosRetry(instance, retryConfig);
+  }
+
+  /**
+   * Check rate limits before making a request
+   * This is called automatically by the request interceptor
+   */
+  private async checkRateLimit(): Promise<void> {
+    const now = Date.now();
+    
+    // Reset rate limit counter if the window has passed
+    if (now > this.rateLimitReset) {
+      this.rateLimitRemaining = this.rateLimitConfig.maxRequestsPerMinute;
+      this.rateLimitReset = now + 60000; // 1 minute from now
+      return;
+    }
+    
+    // If we've hit the rate limit, wait until the reset time
+    if (this.rateLimitRemaining <= 0) {
+      const waitTime = this.rateLimitReset - now + 1000; // Add 1s buffer
+      logger.warn(`Rate limit reached. Waiting ${waitTime}ms until reset`);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      
+      // Reset the counter after waiting
+      this.rateLimitRemaining = this.rateLimitConfig.maxRequestsPerMinute;
+      this.rateLimitReset = Date.now() + 60000; // 1 minute from now
+    }
+    
+    // Decrement the remaining requests counter
+    this.rateLimitRemaining--;
+  }
+
+  /**
+   * Update rate limit info from response headers
+   */
+  private updateRateLimitInfo(headers: any): void {
+    if (headers['x-ratelimit-remaining']) {
+      this.rateLimitRemaining = parseInt(headers['x-ratelimit-remaining'], 10) || 0;
+    }
+    
+    if (headers['x-ratelimit-reset']) {
+      this.rateLimitReset = parseInt(headers['x-ratelimit-reset'], 10) || 0;
+    }
+  }
+
+  /**
+   * Generate a cache key from URL and params
+   */
+  private getCacheKey(url: string, params: Record<string, any> = {}): string {
+    const sortedParams = Object.keys(params)
+      .sort()
+      .map(key => `${key}=${String(params[key])}`)
+      .join('&');
+    
+    return `jupiter:${url}?${sortedParams}`;
+  }
+
+  /**
+   * Make a GET request to the Jupiter API with caching support
+   */
+  async get<T>(
+    endpoint: string,
+    params: Record<string, any> = {},
+    options: RequestOptions = {}
+  ): Promise<T> {
+    const { useCache = true, ttl } = options;
+    
+    // Use the cache service's getOrSet method which handles caching logic
+    return this.cache.getOrSet<T>(
+      this.getCacheKey(endpoint, params),
+      async () => {
+        try {
+          // Apply rate limiting
+          await new Promise<void>((resolve, reject) => {
+            this.rateLimiter.removeTokens(1, (err, remaining) => {
+              if (err) {
+                reject(new RateLimitError('Rate limit error'));
+              } else {
+                resolve();
+              }
+            });
+          });
+          
+          // Make the actual API request
+          const response = await this.client.get<T>(endpoint, {
+            params,
+            paramsSerializer: {
+              // Ensure consistent parameter ordering for cache key generation
+              serialize: (params) => {
+                const searchParams = new URLSearchParams();
+                Object.entries(params)
+                  .sort(([a], [b]) => a.localeCompare(b))
+                  .forEach(([key, value]) => {
+                    if (Array.isArray(value)) {
+                      value.forEach(v => searchParams.append(key, String(v)));
+                    } else if (value !== undefined && value !== null) {
+                      searchParams.append(key, String(value));
+                    }
+                  });
+                return searchParams.toString();
+              },
+            },
+          });
+          
+          if (response.status >= 400) {
+            const error = new Error(`Request failed with status ${response.status}`);
+            (error as any).response = response;
+            throw error;
+          }
+          
+          return response.data;
+        } catch (error) {
+          throw this.handleError(error);
+        }
+      },
+      ttl
+    );
+  }
+
+  /**
+   * Make a POST request to the Jupiter API
+   */
+  async post<T>(
+    endpoint: string,
+    data: Record<string, any> = {},
+    params: Record<string, any> = {},
+    options: RequestOptions = {}
+  ): Promise<T> {
+    const { useCache = false, ttl } = options;
+    const requestId = uuidv4();
+    const cacheKey = this.getCacheKey(endpoint, { ...params, ...data });
+    
+    // For POST requests, we typically don't want to use cache by default
+    // But we'll check if a cached response exists if useCache is true
+    if (useCache) {
+      try {
+        const cached = await this.cache.get<T>(cacheKey);
+        if (cached !== null && cached !== undefined) {
+          this.logger.debug(`Cache hit for POST ${endpoint}`, { requestId });
+          return cached;
+        }
+      } catch (cacheError) {
+        this.logger.warn('Cache read error for POST request', {
+          requestId,
+          endpoint,
+          error: cacheError instanceof Error ? cacheError.message : String(cacheError),
+        });
+        // Continue with the API request if cache read fails
+      }
+    }
+    
+    try {
+      // Apply rate limiting
+      await this.rateLimiter.consume(1);
+      
+      this.logger.debug(`Making POST request to ${endpoint}`, {
+        requestId,
+        params,
+        data: this.sanitizeDataForLogging(data),
+      });
+      
+      const response = await this.client.post<T>(endpoint, data, { params });
+      
+      if (response.status >= 400) {
+        const error = new Error(`Request failed with status ${response.status}`);
+        (error as any).response = response;
+        throw error;
+      }
+      
+      // Cache the response if needed
+      if (useCache && response.status === 200) {
+        try {
+          await this.cache.set(cacheKey, response.data, ttl);
+          this.logger.debug(`Cached POST response for ${endpoint}`, { requestId, ttl });
+        } catch (cacheError) {
+          this.logger.warn('Cache write error for POST request', {
+            requestId,
+            endpoint,
+            error: cacheError instanceof Error ? cacheError.message : String(cacheError),
+          });
+          // Don't fail the request if cache write fails
+        }
+      }
+      
+      return response.data;
+    } catch (error) {
+      this.logger.error(`POST request failed for ${endpoint}`, {
+        requestId,
+        error: error instanceof Error ? error.message : String(error),
+        params,
+        data: this.sanitizeDataForLogging(data),
+        status: (error as any)?.response?.status,
+      });
+      
+      throw this.handleError(error);
+    }
+  }
+  
+  /**
+   * Sanitize sensitive data before logging
+   */
+  private sanitizeDataForLogging(data: Record<string, any>): Record<string, any> {
+    if (!data || typeof data !== 'object') return data;
+    
+    const sensitiveFields = [
+      'privateKey', 'secret', 'password', 'token', 'apiKey', 'authorization',
+      'wallet', 'mnemonic', 'seed', 'signature', 'signedTransaction'
+    ];
+    
+    const sanitized = { ...data };
+    
+    for (const [key, value] of Object.entries(sanitized)) {
+      const keyLower = key.toLowerCase();
+      
+      // Check if this is a sensitive field
+      if (sensitiveFields.some(field => keyLower.includes(field))) {
+        sanitized[key] = '[REDACTED]';
+      }
+      
+      // Recursively sanitize nested objects
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        sanitized[key] = this.sanitizeDataForLogging(value);
+      }
+      
+      // Handle arrays of objects
+      if (Array.isArray(value)) {
+        sanitized[key] = value.map(item => 
+          typeof item === 'object' ? this.sanitizeDataForLogging(item) : item
+        );
+      }
+    }
+    
+    return sanitized;
   }
 
   /**
@@ -108,10 +547,10 @@ class JupiterService {
    */
   public async getQuote(params: QuoteRequestParams): Promise<QuoteResponse> {
     try {
-      const response = await this.client.get<QuoteResponse>('/quote', { params });
-      return response.data;
+      const response = await this.get<QuoteResponse>(API_PATHS.QUOTE, params);
+      return response;
     } catch (error) {
-      this.handleError(error, 'Failed to get quote');
+      this.handleError(error);
       throw error;
     }
   }
@@ -125,22 +564,20 @@ class JupiterService {
     try {
       logger.debug('Fetching price from Jupiter API', { params });
       
-      const response = await this.client.get<PriceResponse>('/price', {
-        params: {
-          inputMint: params.inputMint,
-          outputMint: params.outputMint,
-          amount: params.amount,
-          slippageBps: params.slippageBps || 50,
-          onlyDirectRoutes: params.onlyDirectRoutes || false,
-          includeDetailedRoutes: params.includeDetailedRoutes || false,
-          includeRoutePlan: params.includeRoutePlan || false,
-        },
+      const response = await this.get<PriceResponse>(API_PATHS.PRICE, {
+        inputMint: params.inputMint,
+        outputMint: params.outputMint,
+        amount: params.amount,
+        slippageBps: params.slippageBps || 50,
+        onlyDirectRoutes: params.onlyDirectRoutes || false,
+        includeDetailedRoutes: params.includeDetailedRoutes || false,
+        includeRoutePlan: params.includeRoutePlan || false,
       });
       
       logger.debug('Successfully fetched price from Jupiter API');
-      return response.data;
+      return response;
     } catch (error) {
-      this.handleError(error, 'Failed to fetch price');
+      this.handleError(error);
       throw error;
     }
   }
@@ -154,13 +591,13 @@ class JupiterService {
     swapRequest: SwapTransactionRequest
   ): Promise<SwapTransactionResponse> {
     try {
-      const response = await this.client.post<SwapTransactionResponse>(
-        '/swap',
+      const response = await this.post<SwapTransactionResponse>(
+        API_PATHS.SWAP,
         swapRequest
       );
-      return response.data;
+      return response;
     } catch (error) {
-      this.handleError(error, 'Failed to get swap transaction');
+      this.handleError(error);
       throw error;
     }
   }
@@ -174,13 +611,13 @@ class JupiterService {
     swapInstructionsRequest: SwapInstructionsRequest
   ): Promise<SwapInstructionsResponse> {
     try {
-      const response = await this.client.post<SwapInstructionsResponse>(
-        '/swap-instructions',
+      const response = await this.post<SwapInstructionsResponse>(
+        API_PATHS.SWAP_INSTRUCTIONS,
         swapInstructionsRequest
       );
-      return response.data;
+      return response;
     } catch (error) {
-      this.handleError(error, 'Failed to get swap instructions');
+      this.handleError(error);
       throw error;
     }
   }
@@ -191,10 +628,10 @@ class JupiterService {
    */
   public async getProgramIdToLabel(): Promise<ProgramIdToLabelResponse> {
     try {
-      const response = await this.client.get<ProgramIdToLabelResponse>('/program-id-to-label');
-      return response.data;
+      const response = await this.get<ProgramIdToLabelResponse>(API_PATHS.PROGRAM_ID_TO_LABEL);
+      return response;
     } catch (error) {
-      this.handleError(error, 'Failed to get program ID to label mapping');
+      this.handleError(error);
       throw error;
     }
   }
@@ -215,7 +652,7 @@ class JupiterService {
       );
       return response.data;
     } catch (error) {
-      this.handleError(error, `Failed to get token info for ${mintAddress}`);
+      this.handleError(error);
       throw error;
     }
   }
@@ -241,7 +678,7 @@ class JupiterService {
       );
       return response.data;
     } catch (error) {
-      this.handleError(error, 'Failed to get mints in market');
+      this.handleError(error);
       throw error;
     }
   }
@@ -257,7 +694,7 @@ class JupiterService {
       );
       return response.data.mints;
     } catch (error) {
-      this.handleError(error, 'Failed to get tradable tokens');
+      this.handleError(error);
       throw error;
     }
   }
@@ -277,7 +714,7 @@ class JupiterService {
       );
       return response.data;
     } catch (error) {
-      this.handleError(error, 'Failed to get tagged tokens');
+      this.handleError(error);
       throw error;
     }
   }
@@ -310,7 +747,7 @@ class JupiterService {
       
       return tokens;
     } catch (error) {
-      this.handleError(error, 'Failed to get new tokens');
+      this.handleError(error);
       throw error;
     }
   }
@@ -326,7 +763,7 @@ class JupiterService {
       );
       return response.data;
     } catch (error) {
-      this.handleError(error, 'Failed to get all tokens');
+      this.handleError(error);
       throw error;
     }
   }
@@ -338,10 +775,10 @@ class JupiterService {
    */
   public async getTokens(): Promise<TokenInfo[] | undefined> {
     try {
-      const response = await this.client.get<TokenInfo[]>('/tokens');
+      const response = await this.client.get<TokenInfo[]>(API_PATHS.TOKENS);
       return response.data;
     } catch (error) {
-      this.handleError(error, 'Failed to fetch supported tokens');
+      this.handleError(error);
       return undefined;
     }
   }
@@ -418,7 +855,7 @@ class JupiterService {
         confirmationStatus: 'processed' as const,
       };
     } catch (error) {
-      this.handleError(error, 'Failed to send transaction');
+      this.handleError(error);
       return undefined;
     }
   }
@@ -441,7 +878,7 @@ class JupiterService {
         headers: {
           'Content-Type': 'application/json',
         },
-        timeout: 60000, // 60 seconds for confirmation
+        timeout: 60000, // 60 seconds
       });
 
       // Wait for confirmation
@@ -514,7 +951,7 @@ class JupiterService {
 
       throw new Error(`Transaction not confirmed after ${maxAttempts} seconds`);
     } catch (error) {
-      this.handleError(error, 'Failed to confirm transaction');
+      this.handleError(error);
       return undefined;
     }
   }
@@ -599,46 +1036,107 @@ class JupiterService {
   }
 
   /**
-   * Handle API errors
-   * @param error The error object
-   * @param message Custom error message
+   * Handle API errors and convert them to appropriate custom error types
    */
-  private handleError(error: unknown, message: string): void {
-    if (axios.isAxiosError(error)) {
-      const axiosError = error as AxiosError<JupiterErrorResponse>;
-      
-      if (axiosError.response) {
-        // The request was made and the server responded with a status code
-        // that falls out of the range of 2xx
-        const { status, data } = axiosError.response;
-        const errorMessage = data?.message || axiosError.message;
+  private handleError(error: any): JupiterError {
+    try {
+      if (error.response) {
+        // Handle HTTP errors (4xx, 5xx)
+        const { status, data } = error.response;
+        const errorMessage = data?.message || data?.error || 'Unknown error';
         
-        logger.error(`${message}: ${status} - ${errorMessage}`, {
+        // Handle rate limiting
+        if (status === 429) {
+          // RateLimitError only accepts a message parameter
+          return new RateLimitError('Rate limit exceeded');
+        }
+        
+        // Handle validation errors
+        if (status === 400) {
+          // ValidationError accepts a message and optional details
+          return new ValidationError(
+            errorMessage,
+            data?.details
+          );
+        }
+        
+        // Handle not found errors
+        if (status === 404) {
+          // NotFoundError accepts a resource and optional id
+          return new NotFoundError('Resource', errorMessage);
+        }
+        
+        // Handle insufficient liquidity
+        if (errorMessage.toLowerCase().includes('insufficient liquidity')) {
+          // InsufficientLiquidityError only accepts a message parameter
+          return new InsufficientLiquidityError('Insufficient liquidity for this trade');
+        }
+        
+        // Handle slippage tolerance exceeded
+        if (errorMessage.toLowerCase().includes('slippage')) {
+          // SlippageToleranceExceededError only accepts a message parameter
+          return new SlippageToleranceExceededError('Slippage tolerance exceeded');
+        }
+        
+        // Handle other HTTP errors
+        return new JupiterError(
+          errorMessage,
           status,
-          error: data?.error,
-          message: errorMessage,
-          url: axiosError.config?.url,
-          method: axiosError.config?.method,
-        });
-        
-        throw new Error(`Jupiter API Error (${status}): ${errorMessage}`);
-      } else if (axiosError.request) {
+          `JUPITER_HTTP_${status}`,
+          { 
+            status, 
+            data: data || {},
+            url: error.config?.url,
+            method: error.config?.method
+          }
+        );
+      } else if (error.request) {
         // The request was made but no response was received
-        logger.error(`${message}: No response received`, {
-          message: axiosError.message,
-          url: axiosError.config?.url,
-          method: axiosError.config?.method,
-        });
-        
-        throw new Error('No response received from Jupiter API');
+        return new JupiterError(
+          'No response received from Jupiter API',
+          504,
+          'NO_RESPONSE',
+          { 
+            url: error.config?.url,
+            method: error.config?.method
+          }
+        );
+      } else {
+        // Something happened in setting up the request
+        return new JupiterError(
+          error.message || 'Unknown error occurred',
+          500,
+          'JUPITER_UNKNOWN_ERROR',
+          { 
+            stack: error.stack,
+            name: error.name,
+            code: error.code
+          }
+        );
       }
+    } catch (innerError) {
+      // If something goes wrong in the error handler itself
+      return new JupiterError(
+        'Failed to process error',
+        500,
+        'JUPITER_ERROR_HANDLER_FAILED',
+        { 
+          originalError: error?.message || String(error),
+          handlerError: innerError?.message || String(innerError)
+        }
+      );
     }
-    
-    // Unknown error
-    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    logger.error(`${message}: ${errorMessage}`, { error });
-    throw new Error(`${message}: ${errorMessage}`);
   }
 }
 
-export const jupiterService = new JupiterService();
+// Create a singleton instance with proper JupiterConfig
+export const jupiterService = new JupiterService({
+  baseUrl: process.env.JUPITER_API_BASE_URL || 'https://quote-api.jup.ag/v6',
+  apiKey: process.env.JUPITER_API_KEY,
+  timeout: 30000, // 30 seconds
+  rateLimit: {
+    tokensPerInterval: 60, // 60 requests per minute
+    interval: 'minute' as const,
+  },
+  cacheTtl: 300, // 5 minutes
+});
