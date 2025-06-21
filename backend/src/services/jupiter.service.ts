@@ -46,7 +46,7 @@ class JupiterService {
 
     // Add request interceptor for logging
     this.client.interceptors.request.use(
-      (config) => {
+      (config: any) => {
         logger.debug(`Request: ${config.method?.toUpperCase()} ${config.url}`, {
           baseURL: config.baseURL,
           params: config.params,
@@ -54,7 +54,7 @@ class JupiterService {
         });
         return config;
       },
-      (error) => {
+      (error: any) => {
         logger.error('Request Error:', error);
         return Promise.reject(error);
       }
@@ -62,7 +62,7 @@ class JupiterService {
 
     // Add response interceptor for logging and error handling
     this.client.interceptors.response.use(
-      (response) => {
+      (response: any) => {
         logger.debug(`Response: ${response.status} ${response.config.url}`, {
           status: response.status,
           statusText: response.statusText,
@@ -70,7 +70,7 @@ class JupiterService {
         });
         return response;
       },
-      (error) => {
+      (error: any) => {
         if (error.response) {
           // The request was made and the server responded with a status code
           // that falls out of the range of 2xx
@@ -112,6 +112,21 @@ class JupiterService {
       return response.data;
     } catch (error) {
       this.handleError(error, 'Failed to get quote');
+      throw error;
+    }
+  }
+
+  /**
+   * Get price information for a token swap
+   * @param params Price request parameters
+   * @returns Promise with price response
+   */
+  public async getPrice(params: PriceRequestParams): Promise<PriceResponse> {
+    try {
+      const response = await this.client.get<PriceResponse>('/price', { params });
+      return response.data;
+    } catch (error) {
+      this.handleError(error, 'Failed to get price');
       throw error;
     }
   }
@@ -267,14 +282,15 @@ class JupiterService {
       const tokens: Record<string, TokenInfo> = {};
       
       for (const [mint, tokenData] of Object.entries(response.data)) {
+        const token = tokenData as any;
         tokens[mint] = {
-          address: tokenData.mint,
+          address: token.mint,
           chainId: 101, // Mainnet
-          name: tokenData.name,
-          symbol: tokenData.symbol,
-          decimals: tokenData.decimals,
-          logoURI: tokenData.logoURI,
-          tags: tokenData.tags || []
+          name: token.name,
+          symbol: token.symbol,
+          decimals: token.decimals,
+          logoURI: token.logoURI,
+          tags: token.tags || []
         };
       }
       
@@ -543,7 +559,7 @@ class JupiterService {
 
       // Extract memo from log messages if available
       let memo: string | null = null;
-      const memoLog = response.data.result.meta?.logMessages?.find(msg => 
+      const memoLog = response.data.result.meta?.logMessages?.find((msg: string) => 
         msg.includes('Program log: Memo: {')
       );
       

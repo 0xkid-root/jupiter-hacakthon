@@ -50,7 +50,7 @@
     "sourceRoot": "/",
     
     /* Type Checking */
-    "types": ["node", "express", "express-validator"],
+    "types": ["node", "express"],
     "typeRoots": ["./node_modules/@types", "./src/types"]
   },
   "include": ["src/**/*"],

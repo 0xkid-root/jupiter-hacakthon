@@ -71,7 +71,6 @@ const logger = winston.createLogger({
 
 // Create logs directory if it doesn't exist
 const fs = require('fs');
-const path = require('path');
 const logDir = 'logs';
 
 if (!fs.existsSync(logDir)) {

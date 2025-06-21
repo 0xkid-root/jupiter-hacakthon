@@ -8,7 +8,7 @@ type AsyncRequestHandler = (
   req: Request,
   res: Response,
   next: NextFunction
-) => Promise<Response | void>;
+) => Promise<void>;
 
 const asyncHandler = (fn: AsyncRequestHandler): RequestHandler => 
   (req: Request, res: Response, next: NextFunction) => {
@@ -146,11 +146,11 @@ const routeValidations = {
  *                   $ref: '#/components/schemas/QuoteResponse'
  */
 
-router.get('/quote', validate(routeValidations.getQuote), asyncHandler(
-  async (req: Request, res: Response, next: NextFunction) => {
-    return await jupiterController.getQuote(req, res, next);
+router.get('/quote', validate(routeValidations.getQuote), 
+  (req: Request, res: Response, next: NextFunction) => {
+    jupiterController.getQuote(req, res, next);
   }
-));
+);
 
 /**
  * @swagger

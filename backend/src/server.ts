@@ -1,4 +1,4 @@
-import App from './app';
+import App from './index';
 import { logger } from './utils/logger';
 
 // Create server instance
