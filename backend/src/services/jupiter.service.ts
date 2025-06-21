@@ -119,14 +119,28 @@ class JupiterService {
   /**
    * Get price information for a token swap
    * @param params Price request parameters
-   * @returns Promise with price response
+   * @returns Promise with price information
    */
   public async getPrice(params: PriceRequestParams): Promise<PriceResponse> {
     try {
-      const response = await this.client.get<PriceResponse>('/price', { params });
+      logger.debug('Fetching price from Jupiter API', { params });
+      
+      const response = await this.client.get<PriceResponse>('/price', {
+        params: {
+          inputMint: params.inputMint,
+          outputMint: params.outputMint,
+          amount: params.amount,
+          slippageBps: params.slippageBps || 50,
+          onlyDirectRoutes: params.onlyDirectRoutes || false,
+          includeDetailedRoutes: params.includeDetailedRoutes || false,
+          includeRoutePlan: params.includeRoutePlan || false,
+        },
+      });
+      
+      logger.debug('Successfully fetched price from Jupiter API');
       return response.data;
     } catch (error) {
-      this.handleError(error, 'Failed to get price');
+      this.handleError(error, 'Failed to fetch price');
       throw error;
     }
   }
