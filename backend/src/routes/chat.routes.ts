@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { ChatController } from '../controllers/chat.controller';
-import { asyncHandler } from './jupiter.routes';
+import { asyncHandler } from '../utils/asyncHandler';
 
 const router = Router();
 const chatController = new ChatController();

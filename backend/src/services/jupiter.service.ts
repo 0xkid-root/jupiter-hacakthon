@@ -2,7 +2,7 @@ import axios, { AxiosError, AxiosInstance } from 'axios';
 import axiosRetry, { IAxiosRetryConfig, exponentialDelay } from 'axios-retry';
 import { v4 as uuidv4 } from 'uuid';
 // Config removed as it's not used
-import { logger } from '../utils/logger';
+import logger from '../utils/logger';
 import { 
   QuoteRequestParams,
   QuoteResponse,
@@ -325,10 +325,11 @@ class JupiterService {
     options: RequestOptions = {}
   ): Promise<T> {
     const requestId = uuidv4();
+    const rateLimitKey = 'jupiter-api';
     
     try {
       // Apply rate limiting
-      await this.rateLimiter.consume(1);
+      await this.rateLimiter.consume(rateLimitKey, 1);
       
       this.logger.debug(`Making POST request to ${endpoint}`, {
         requestId,
@@ -384,10 +385,11 @@ class JupiterService {
     options: RequestOptions = {}
   ): Promise<T> {
     const requestId = uuidv4();
+    const rateLimitKey = 'jupiter-api';
     
     try {
       // Apply rate limiting
-      await this.rateLimiter.consume(1);
+      await this.rateLimiter.consume(rateLimitKey, 1);
       
       this.logger.debug(`Making GET request to ${endpoint}`, {
         requestId,

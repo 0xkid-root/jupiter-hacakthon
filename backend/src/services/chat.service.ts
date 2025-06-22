@@ -1,14 +1,22 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Message, ChatSession, AIResponse } from '../interfaces/chat.interface';
 import { v4 as uuidv4 } from 'uuid';
+import { Pool } from 'pg';
 
 export class ChatService {
   private genAI: GoogleGenerativeAI;
   private model: any;
+  private pool: Pool;
+  private sessions: Map<string, ChatSession> = new Map();
 
   constructor() {
     this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
     this.model = this.genAI.getGenerativeModel({ model: 'gemini-pro' });
+    
+    this.pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    });
   }
 
   async createChatSession(userId: string, context?: string): Promise<ChatSession> {
@@ -22,6 +30,38 @@ export class ChatService {
     };
     return session;
   }
+
+  async getSession(sessionId: string): Promise<ChatSession | null> {
+    try {
+      const result = await this.pool.query(
+        'SELECT * FROM chat_sessions WHERE id = $1',
+        [sessionId]
+      );
+      
+      if (result.rows.length === 0) {
+        return null;
+      }
+      
+      return result.rows[0];
+    } catch (error) {
+      console.error('Error getting session:', error);
+      throw new Error('Failed to get session');
+    }
+  }
+
+  async getUserSessions(userId: string): Promise<ChatSession[]> {
+    try {
+      const result = await this.pool.query(
+        'SELECT * FROM chat_sessions WHERE user_id = $1 ORDER BY updated_at DESC',
+        [userId]
+      );
+      return result.rows;
+    } catch (error) {
+      console.error('Error getting user sessions:', error);
+      throw new Error('Failed to get user sessions');
+    }
+  }
+
 
   async generateResponse(message: string, context?: string): Promise<AIResponse> {
     try {

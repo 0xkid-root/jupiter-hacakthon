@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import config from './config';
 import apiRoutes from './routes';
-import { logger, stream } from './utils/logger';
+import logger, { stream } from './utils/logger';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 
 class App {
