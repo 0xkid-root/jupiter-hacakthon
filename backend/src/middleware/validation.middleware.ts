@@ -103,7 +103,6 @@ export const validationRules = {
       .withMessage('amount must be a string')
       .notEmpty()
       .withMessage('amount is required')
-      .withMessage('amount is required')
       .matches(/^\d+$/)
       .withMessage('amount must be a valid number string'),
     query('slippageBps')

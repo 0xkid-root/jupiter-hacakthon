@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { validationResult } from 'express-validator';
 import { QuoteRequestParams, PriceRequestParams } from '../interfaces/jupiter.interface';
 import { jupiterService } from '../services/jupiter.service';
-import { logger } from '../utils/logger';
+import logger from '../utils/logger';
 
 class JupiterController {
   /**

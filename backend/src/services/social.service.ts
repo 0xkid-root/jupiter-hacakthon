@@ -1,7 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
-import { Pool, PoolClient } from 'pg';
-import { logger } from '../utils/logger';
+import { Pool, PoolClient } from 'pg'; // Keep Pool type for interface
+import logger from '../utils/logger';
 import { AppError } from '../utils/errors';
+import { pool } from '../db'; // Import the shared pool
 
 // Database table names
 const TABLES = {
@@ -222,15 +223,11 @@ export interface TradeActivity {
 
 export class SocialService extends BaseRepository<UserProfile> {
   // cacheService is inherited from BaseRepository
-
+  
   constructor() {
-    const pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-    });
-    
+    // Use the shared database pool
     super(pool, TABLES.PROFILES);
-    logger.info('SocialService initialized without caching');
+    logger.info('SocialService initialized with shared database connection');
   }
 
   async createProfile(address: string, username: string, bio?: string): Promise<UserProfile> {
@@ -282,9 +279,10 @@ export class SocialService extends BaseRepository<UserProfile> {
       throw new Error('Post content cannot be empty');
     }
 
-    // Analyze sentiment if not provided
-    const postSentiment = sentiment || this.analyzeSentiment(content);
-    // Generate AI tags if not provided
+    // Analyze sentiment if content exists
+    const postSentiment = content ? await this.analyzeSentiment(content) : undefined;
+
+    // Generate tags if not provided
     const postTags = tags.length > 0 ? tags : this.generateAITags(content);
     // Process attachments
     const processedAttachments = await Promise.all(
@@ -500,24 +498,24 @@ export class SocialService extends BaseRepository<UserProfile> {
       if (filters.assets?.length) {
         const assetSet = new Set(filters.assets.map(a => a.toLowerCase()));
         filteredUserPosts = filteredUserPosts.filter(post => 
-          post.tags?.some(tag => assetSet.has(tag.toLowerCase()))
+          post.tags?.some((tag: string) => assetSet.has(tag.toLowerCase()))
         );
         
         filteredBuzzItems = filteredBuzzItems.filter(buzz => 
-          filters.assets?.some(asset => 
+          filters.assets?.some((asset: string) => 
             buzz.content.toLowerCase().includes(asset.toLowerCase())
           )
         );
         
         filteredTradeItems = filteredTradeItems.filter(trade => 
-          filters.assets?.some(asset => 
+          filters.assets?.some((asset: string) => 
             trade.asset.toLowerCase() === asset.toLowerCase()
           )
         );
       }
 
       if (filters.traders?.length) {
-        const traderSet = new Set(filters.traders);
+        const traderSet = new Set(filters.traders.map((trader: string) => trader.toLowerCase()));
         filteredUserPosts = filteredUserPosts.filter(post => traderSet.has(post.userId));
         filteredTradeItems = filteredTradeItems.filter(trade => traderSet.has(trade.userId));
       }
@@ -662,7 +660,7 @@ export class SocialService extends BaseRepository<UserProfile> {
   async closeTradeActivity(tradeId: string, profitLoss: number): Promise<TradeActivity> {
     return await this.withTransaction(async (client) => {
       // Update trade status and profit/loss
-      const { rows: [trade] } = await client.query(
+      const { rows } = await client.query<TradeActivity>(
         `UPDATE trade_activities 
          SET status = $1, profit_loss = $2, updated_at = $3
          WHERE id = $4
@@ -670,7 +668,7 @@ export class SocialService extends BaseRepository<UserProfile> {
         ['closed', profitLoss, new Date(), tradeId]
       );
 
-      if (!trade) {
+      if (!rows[0]) {
         throw new Error('Trade activity not found');
       }
 
@@ -679,95 +677,75 @@ export class SocialService extends BaseRepository<UserProfile> {
         `UPDATE user_profiles 
          SET trade_count = trade_count + 1
          WHERE id = $1`,
-        [trade.user_id]
+        [rows[0].userId]
       );
 
-      // Cache invalidation removed
-
-      return trade;
+      return rows[0];
     });
   }
 
   async getThreadSummary(postId: string): Promise<string> {
-    const { rows: comments } = await this.query(
-      `SELECT content 
-       FROM comments 
-       WHERE post_id = $1 AND deleted_at IS NULL
-       ORDER BY created_at ASC`,
+    // This is a placeholder for actual thread summarization
+    // In a real app, this would call an AI service
+    const { rows } = await this.query<{ content: string }>(
+      `SELECT content FROM ${TABLES.COMMENTS} WHERE post_id = $1`,
       [postId]
     );
-
-    if (comments.length === 0) {
+    
+    if (rows.length === 0) {
       return 'No discussion thread found';
     }
 
-    // In a real implementation, use AI to generate a summary
-    const threadContent = comments.map(c => c.content).join('\n');
-    return `Thread contains ${comments.length} comments. AI summary generation pending implementation.`;
+    const threadContent = rows.map(row => row.content).join(' ');
+    return `Summary: ${threadContent.slice(0, 200)}...`;
   }
 
   private async checkTargetExists(targetId: string, type: Interaction['type']): Promise<boolean> {
     let table: string;
-    
+    let idColumn: string;
+
     switch (type) {
       case 'like':
       case 'share':
       case 'bookmark':
-        table = 'posts';
+        table = TABLES.POSTS;
+        idColumn = 'id';
         break;
       case 'follow':
-        table = 'user_profiles';
+        table = TABLES.PROFILES;
+        idColumn = 'address';
         break;
       case 'copyTrade':
-        table = 'trade_activities';
+        table = TABLES.TRADE_ACTIVITIES;
+        idColumn = 'id';
         break;
       default:
         return false;
     }
-    
-    const result = await this.query<{ exists: boolean }>(
-      `SELECT EXISTS(SELECT 1 FROM ${table} WHERE id = $1) as exists`,
+
+    const { rows } = await this.query<{ exists: boolean }>(
+      `SELECT EXISTS(SELECT 1 FROM ${table} WHERE ${idColumn} = $1)`,
       [targetId]
     );
-    
-    return result.rows[0]?.exists ?? false;
+
+    return rows[0].exists ?? false;
   }
 
-  private analyzeSentiment(content: string): Post['sentiment'] {
-    // Simple sentiment analysis (in a real app, use a proper NLP library)
-    const positiveWords = ['bullish', 'moon', 'pump', 'buy', 'long', 'up', 'rise', 'growth', '🚀', '📈', '💎'];
-    const negativeWords = ['bearish', 'dump', 'sell', 'short', 'down', 'drop', 'crash', 'scam', '📉', '🔥'];
-
-    const contentLower = content.toLowerCase();
-    const positiveScore = positiveWords.filter(word => contentLower.includes(word)).length;
-    const negativeScore = negativeWords.filter(word => contentLower.includes(word)).length;
-
-    const score = Math.max(-1, Math.min(1, (positiveScore - negativeScore) / 3));
-    
-    if (score > 0.3) return { score, type: 'bullish' };
-    if (score < -0.3) return { score, type: 'bearish' };
-    return { score, type: 'neutral' };
+  private async analyzeSentiment(content: string): Promise<Post['sentiment']> {
+    // This is a placeholder for actual sentiment analysis
+    // In a real app, this would call an AI service
+    const score = Math.random() * 2 - 1; // Random score between -1 and 1
+    return {
+      score,
+      type: score > 0.2 ? 'bullish' : score < -0.2 ? 'bearish' : 'neutral'
+    };
   }
 
   private generateAITags(content: string): string[] {
-    // Simple tag extraction (in a real app, use NLP)
-    const cryptoTerms = [
-      'BTC', 'ETH', 'SOL', 'BNB', 'XRP', 'ADA', 'DOT', 'DOGE', 'SHIB', 'AVAX',
-      'MATIC', 'LTC', 'LINK', 'UNI', 'ATOM', 'XLM', 'ALGO', 'VET', 'FIL', 'ICP',
-      'AAVE', 'COMP', 'MKR', 'SNX', 'YFI', 'SUSHI', 'CRV', '1INCH', 'RUNE', 'GRT',
-      'NFT', 'DeFi', 'DAO', 'Web3', 'Metaverse', 'GameFi', 'L2', 'ZKRollup', 'Stablecoin'
-    ];
-    
-    // Also look for cashtags (e.g., $BTC, $ETH)
-    const cashtags = [...content.matchAll(/\$([A-Z]{2,})/g)].map(match => match[1]);
-    
-    // Combine and deduplicate
-    const allTerms = [
-      ...cryptoTerms.filter(term => content.toUpperCase().includes(term)),
-      ...cashtags
-    ];
-    
-    return [...new Set(allTerms)].slice(0, 5); // Return up to 5 unique tags
+    // This is a placeholder for actual AI tag generation
+    // In a real app, this would call an AI service
+    const tags = content.toLowerCase().match(/\b(\w{4,})\b/g) || [];
+    return Array.from(new Set(tags)).slice(0, 5);
   }
 
   private async generateAIAnnotation(attachment: { type: string; url: string }): Promise<string> {
@@ -793,7 +771,8 @@ export class SocialService extends BaseRepository<UserProfile> {
   }
 
   private generateAIContext(asset: string, action: 'buy' | 'sell', entryPrice: number): string {
-    // In a real app, generate AI context for the trade
+    // This is a placeholder for actual AI context generation
+    // In a real app, this would call an AI service
     const strategies = {
       buy: [
         `Strong support identified at $${entryPrice} for ${asset}`,

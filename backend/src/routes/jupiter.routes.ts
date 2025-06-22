@@ -1,98 +1,7 @@
-import { Router, Request, Response, NextFunction, RequestHandler } from 'express';
-import { query } from 'express-validator';
+import { Router, Request, Response, NextFunction } from 'express';
 import { jupiterController } from '../controllers/jupiter.controller';
-import { validate, validationRules } from '../middleware/validation.middleware';
-
-// Type-safe wrapper for async controller methods
-function asyncHandler(
-  fn: (req: Request, res: Response, next: NextFunction) => Promise<void>
-): RequestHandler {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    fn(req, res, next).catch(next);
-  };
-}
 
 const router = Router();
-
-// Validation schemas for query parameters
-const queryValidation = {
-  required: (field: string) => validationRules.requiredQueryString(field),
-  optional: (field: string) => validationRules.optionalQueryString(field),
-  requiredNumber: (field: string) => query(field).isNumeric().withMessage(`${field} must be a number`),
-  optionalNumber: (field: string) => query(field).optional().isNumeric().withMessage(`${field} must be a number`),
-  requiredBoolean: (field: string) => query(field).isBoolean().withMessage(`${field} must be a boolean`),
-  optionalBoolean: (field: string) => query(field).optional().isBoolean().withMessage(`${field} must be a boolean`),
-};
-
-// Validation schemas for body parameters
-const bodyValidation = {
-  required: (field: string) => validationRules.requiredString(field),
-  optional: (field: string) => validationRules.optionalString(field),
-  requiredNumber: (field: string) => validationRules.requiredNumber(field),
-  optionalNumber: (field: string) => validationRules.optionalNumber(field),
-  requiredBoolean: (field: string) => validationRules.requiredBoolean(field),
-  optionalBoolean: (field: string) => validationRules.optionalBoolean(field),
-};
-
-// Route validation schemas
-const routeValidations = {
-  getPrice: [
-    queryValidation.required('inputMint'),
-    queryValidation.required('outputMint'),
-    queryValidation.required('amount'),
-    queryValidation.optionalNumber('slippageBps'),
-    queryValidation.optionalBoolean('onlyDirectRoutes'),
-    queryValidation.optionalBoolean('includeDetailedRoutes'),
-    queryValidation.optionalBoolean('includeRoutePlan'),
-  ],
-  getQuote: [
-    queryValidation.required('inputMint'),
-    queryValidation.required('outputMint'),
-    queryValidation.required('amount'),
-    queryValidation.optionalNumber('slippageBps'),
-    queryValidation.optionalBoolean('restrictIntermediateTokens'),
-    queryValidation.optional('swapMode'),
-    queryValidation.optionalNumber('feeBps'),
-    queryValidation.optionalBoolean('onlyDirectRoutes'),
-    queryValidation.optionalBoolean('asLegacyTransaction'),
-    queryValidation.optionalNumber('maxAccounts'),
-  ],
-  getSwapTransaction: [
-    bodyValidation.required('userPublicKey'),
-    bodyValidation.required('inputMint'),
-    bodyValidation.required('outputMint'),
-    bodyValidation.required('amount'),
-    bodyValidation.optionalBoolean('wrapAndUnwrapSol'),
-    bodyValidation.optionalNumber('prioritizationFeeLamports'),
-    bodyValidation.optionalBoolean('asLegacyTransaction'),
-    bodyValidation.optionalBoolean('useSharedAccounts'),
-    bodyValidation.optionalNumber('computeUnitPriceMicroLamports'),
-    bodyValidation.optionalBoolean('useVersionedTransaction'),
-    bodyValidation.optionalBoolean('asLegacyTransactionIfUnsupported'),
-  ],
-  getSwapInstructions: [
-    bodyValidation.required('userPublicKey'),
-    bodyValidation.required('inputMint'),
-    bodyValidation.required('outputMint'),
-    bodyValidation.required('amount'),
-    bodyValidation.optionalBoolean('wrapAndUnwrapSol'),
-  ],
-  getMintsInMarket: [
-    queryValidation.required('inputMint'),
-    queryValidation.required('outputMint'),
-    queryValidation.required('amount'),
-  ],
-  getTaggedTokens: [
-    queryValidation.required('tags'),
-  ],
-  sendTransaction: [
-    bodyValidation.required('signedTransaction'),
-    bodyValidation.optionalBoolean('skipPreflight'),
-    bodyValidation.optionalNumber('maxRetries'),
-    bodyValidation.optional('commitment'),
-  ],
-  getProgramIdToLabel: [],
-};
 
 /**
  * @swagger
@@ -143,10 +52,8 @@ const routeValidations = {
  *                   $ref: '#/components/schemas/QuoteResponse'
  */
 
-router.get('/quote', validate(routeValidations.getQuote), 
-  asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-    await jupiterController.getQuote(req, res, next);
-  })
+router.get('/quote', (req: Request, res: Response, next: NextFunction) => 
+  jupiterController.getQuote(req, res, next)
 );
 
 /**
@@ -215,10 +122,8 @@ router.get('/quote', validate(routeValidations.getQuote),
  *       500:
  *         description: Internal server error
  */
-router.get('/price', validate(routeValidations.getPrice), 
-  asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-    await jupiterController.getPrice(req, res, next);
-  })
+router.get('/price', (req: Request, res: Response, next: NextFunction) => 
+  jupiterController.getPrice(req, res, next)
 );
 
 /**
@@ -273,10 +178,8 @@ router.get('/price', validate(routeValidations.getPrice),
  *                 data:
  *                   $ref: '#/components/schemas/SwapTransactionResponse'
  */
-router.post('/swap', validate(routeValidations.getSwapTransaction), 
-  asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-    await jupiterController.getSwapTransaction(req, res, next);
-  })
+router.post('/swap', (req: Request, res: Response, next: NextFunction) => 
+  jupiterController.getSwapTransaction(req, res, next)
 );
 
 /**
@@ -325,10 +228,8 @@ router.post('/swap', validate(routeValidations.getSwapTransaction),
  *                 data:
  *                   $ref: '#/components/schemas/SwapInstructionsResponse'
  */
-router.post('/swap-instructions', validate(routeValidations.getSwapInstructions), 
-  asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-    await jupiterController.getSwapInstructions(req, res, next);
-  })
+router.post('/swap-instructions', (req: Request, res: Response, next: NextFunction) => 
+  jupiterController.getSwapInstructions(req, res, next)
 );
 
 /**
@@ -381,10 +282,8 @@ router.post('/swap-instructions', validate(routeValidations.getSwapInstructions)
  *       500:
  *         description: Internal server error
  */
-router.post('/send-transaction', validate(routeValidations.sendTransaction), 
-  asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
-    await jupiterController.sendTransaction(req, res, next);
-  })
+router.post('/v1/send-transaction', (req: Request, res: Response, next: NextFunction) => 
+  jupiterController.sendTransaction(req, res, next)
 );
 
 /**
@@ -409,11 +308,9 @@ router.post('/send-transaction', validate(routeValidations.sendTransaction),
  *                     type: string
  *                   description: Mapping of program IDs to their labels
  */
-router.get('/program-id-to-label', asyncHandler(
-  async (req: Request, res: Response, next: NextFunction) => {
-    return await jupiterController.getProgramIdToLabel(req, res, next);
-  }
-));
+router.get('/program-id-to-label', (req: Request, res: Response, next: NextFunction) => 
+  jupiterController.getProgramIdToLabel(req, res, next)
+);
 
 /**
  * @swagger
@@ -447,10 +344,8 @@ router.get('/program-id-to-label', asyncHandler(
  *                       logoURI:
  *                         type: string
  */
-router.get('/tokens', asyncHandler(
-  async (req: Request, res: Response, next: NextFunction) => {
-    return await jupiterController.getTokens(req, res, next);
-  }
-));
+router.get('/tokens', (req: Request, res: Response, next: NextFunction) => 
+  jupiterController.getTokens(req, res, next)
+);
 
 export default router;
